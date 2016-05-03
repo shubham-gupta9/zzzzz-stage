@@ -1,13 +1,80 @@
-gfrom flask import Flask
+import os
+import requests
+import operator
+import re
+import nltk
+from flask import Flask, render_template, request
+from flask.ext.sqlalchemy import SQLAlchemy
+from stop_words import stops
+from collections import Counter
+from bs4 import BeautifulSoup
+from rq import Queue
+from rq.job import Job
+from worker import conn
+
 app = Flask(__name__)
 
-@app.route('/')
-def hello():
-	return "Hello World!"
+app.config.from_object(os.environ['APP_SETTINGS'])
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = True
+db = SQLAlchemy(app)
 
-@app.route('/<name>')
-def hello_name(name):
-	return "Hello {}!".format(name)
+q = Queue(connection=conn)
+
+from models import *
+
+@app.route('/',methods=['GET','POST'])
+def count_and_save_words(url):
+	errors = []
+	
+	
+		try:
+			
+			r = requests.get(url)
+			
+		except:
+			error.append("Unable to get an URL. Please make sure it's valid and try again")
+
+			return {"error":errors}
+
+		raw = BeautifulSoup(r.text,'html.parser').get_text()
+		nltk.data.path.append('./nltk_data/')
+		tokens = nltk.word_tokenize(raw)
+		text = nltk.Text(tokens)
+
+		nonPunct = re.compile('.*[A-Za-z].*')
+		raw_words = [w for w in text if nonPunct.match(w)]
+		raw_word_count = Counter(raw_words)
+
+		no_stop_words = [w for w in raw_words if w.lower() not in stops]
+		no_stop_words_count = Counter(no_stop_words)
+
+			
+		try:
+			result = Result(
+				url=url,
+				result_all=raw_word_count,
+				result_no_stop_words=no_stop_words_count
+			)
+			db.session.add(result)
+			db.session.commit()
+			return result.id
+		except:
+			errors.append("Unable to add item to database.")
+			return {"error":errors}
+
+@app.routr('/',methods=['GET','POST'])
+def index():
+	results = {}
+	if request.method == "POST":
+		url = request.form['url']
+		if 'http://' not in url[:7]:
+			url = 'http://' + url
+		job = q.enqueue_call(
+			func=count_and_save_words, args=(url,), result_ttl=5000
+		)
+		print(job.get_id())
+
+	return render_template('index.html',results=results)
 
 if __name__=='__main__':
 	app.run(debug=True)
